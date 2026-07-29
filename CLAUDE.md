@@ -4,20 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-"Cuadre" is a single-file, static personal finance web app (Spanish UI). There is no build system, package manager, bundler, or test suite — the entire application (markup, CSS, and JS) lives in `index.html`. There is no server-side code.
+"Cuadre" is a single-file, static personal finance web app (Spanish UI) backed by Supabase (Postgres). There is no build system, package manager, bundler, or test suite — the entire client application (markup, CSS, and JS) lives in `index.html`. The only other app file is `supabase/schema.sql`, the source of truth for the database schema.
 
 ## Development
 
 - There are no build/lint/test commands — this project has no `package.json`, no dependencies, and no tooling. Just edit `index.html` directly.
-- To preview changes, open `index.html` directly in a browser, or serve it locally (e.g. `python -m http.server`) if `file://` restrictions cause issues with `window.storage`.
-- There is no automated test suite. Verify changes manually in a browser.
+- To preview changes, open `index.html` directly in a browser, or serve it locally (e.g. `python -m http.server`). Requires network access to Supabase — there is no offline/local fallback.
+- There is no automated test suite. Verify changes manually in a browser, and cross-check writes in the Supabase Table Editor.
+- Schema changes go in `supabase/schema.sql` and must be run manually by the user in the Supabase SQL Editor (Claude has no direct DB/MCP access to this project) — always keep that file in sync with whatever schema changes are made.
 
 ## Architecture
 
-Everything lives in `index.html`, structured as:
+Everything client-side lives in `index.html`, structured as:
 1. `<style>` block — CSS custom properties (in `:root`) define the color palette/theme; component styles follow (cards, chips, modals/"sheets", calendar, sliders).
 2. HTML body — the main screen (balance, "saldo relativo" tile, movement list) plus three modal overlays: the add/edit movement sheet (`#overlay`), the "saldo relativo" / credit card payment planner (`#cardsOverlay`), and the credit card create/edit form (`#cardFormOverlay`).
-3. A single IIFE `<script>` at the bottom containing all app logic.
+3. A `<script src=".../@supabase/supabase-js@2">` CDN include, followed by a single IIFE `<script>` containing all app logic.
 
 ### State model
 
@@ -29,7 +30,8 @@ state = {
   creditCards: []          // {id, name, totalDebt, cutDay, dueDay, minPercent, minPayment, paymentAmount}
 }
 ```
-- Persistence is via `window.storage.get/set(STORAGE_KEY, ...)` (`STORAGE_KEY = "cuadre-data"`), an injected host API — not `localStorage`. The whole `state` object is JSON-serialized on every save (`saveData()`) and reloaded on startup (`loadData()`).
+- Persistence is via Supabase (`sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)`, client-safe publishable/anon key embedded directly in `index.html` — there is no login, so RLS policies on every table are open to the `anon` role; see `supabase/schema.sql`). `loadData()` fetches all three tables in parallel on startup and populates `state`. There is no whole-state save: each mutation (add/edit/delete movement, add category, add/edit/delete card, drag a payment knob) calls its own targeted Supabase function (`insertMovement`, `updateMovement`, `deleteMovementRow`, `insertCategory`, `insertCard`, `updateCard`, `deleteCardRow`). The pattern at every call site is: await the Supabase call, bail out with `showSaveError()` on failure (local `state` is left untouched), otherwise mutate `state` and re-render — `state` should always mirror what's actually persisted.
+- DB rows use snake_case columns (`credit_cards` in particular: `total_debt`, `cut_day`, `due_day`, `min_percent`, `min_payment`, `payment_amount`); `rowToCard`/`cardToRow` convert to/from the camelCase shape used in `state`. `movements` and `categories` need no name mapping. `movements.created_at` is a `bigint` (epoch ms, matching JS `Date.now()`) used only for list sort tie-breaking — not a `timestamptz`.
 - `render()` is the top-level re-render entry point, fanning out to `renderBalance`, `renderList`, `renderRelativeTile`, and `renderPinnedCards`. Call `render()` (or the specific sub-renderer) after any state mutation — there is no reactive framework, so nothing re-renders automatically.
 
 ### Key concepts

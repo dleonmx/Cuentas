@@ -949,10 +949,14 @@
     </div>
   </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 (function(){
+  const SUPABASE_URL = "https://oylnzuxbuledbgdfzdyr.supabase.co";
+  const SUPABASE_ANON_KEY = "sb_publishable_iEsr5OyDhleSwKbRBzGZPg_dwTFosJY";
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
   const DEFAULT_CATEGORIES = ["Comida", "Transporte", "Renta", "Entretenimiento", "Salud", "Otros"];
-  const STORAGE_KEY = "cuadre-data";
 
   let state = {
     categories: [...DEFAULT_CATEGORIES],
@@ -969,28 +973,80 @@
   let editingCardId = null;
   let cardsCalViewDate = new Date();
 
-  // ---------- Persistence ----------
+  // ---------- Persistence (Supabase) ----------
+  function rowToCard(r) {
+    return {
+      id: r.id, name: r.name, totalDebt: r.total_debt, cutDay: r.cut_day, dueDay: r.due_day,
+      minPercent: r.min_percent, minPayment: r.min_payment, paymentAmount: r.payment_amount
+    };
+  }
+  function cardToRow(c) {
+    return {
+      id: c.id, name: c.name, total_debt: c.totalDebt, cut_day: c.cutDay, due_day: c.dueDay,
+      min_percent: c.minPercent, min_payment: c.minPayment, payment_amount: c.paymentAmount
+    };
+  }
+
+  function showLoadError() {
+    alert("No se pudo conectar con Supabase. Revisa tu conexión y recarga la página.");
+  }
+  function showSaveError(e) {
+    console.error(e);
+    alert("No se pudo guardar el cambio. Revisa tu conexión e intenta de nuevo.");
+  }
+
   async function loadData() {
-    try {
-      const res = await window.storage.get(STORAGE_KEY);
-      if (res && res.value) {
-        const parsed = JSON.parse(res.value);
-        if (parsed.categories && parsed.categories.length) state.categories = parsed.categories;
-        if (parsed.movements) state.movements = parsed.movements;
-        if (parsed.creditCards) state.creditCards = parsed.creditCards;
-      }
-    } catch (e) {
-      // no data yet, use defaults
+    const [catsRes, movesRes, cardsRes] = await Promise.all([
+      sb.from("categories").select("name").order("created_at", { ascending: true }),
+      sb.from("movements").select("*").order("created_at", { ascending: true }),
+      sb.from("credit_cards").select("*").order("created_at", { ascending: true })
+    ]);
+    if (catsRes.error || movesRes.error || cardsRes.error) {
+      console.error(catsRes.error || movesRes.error || cardsRes.error);
+      showLoadError();
+      return;
     }
+    if (catsRes.data.length) state.categories = catsRes.data.map(r => r.name);
+    state.movements = movesRes.data.map(r => ({
+      id: r.id, category: r.category, amount: r.amount, type: r.type, date: r.date, createdAt: r.created_at
+    }));
+    state.creditCards = cardsRes.data.map(rowToCard);
     render();
   }
 
-  async function saveData() {
-    try {
-      await window.storage.set(STORAGE_KEY, JSON.stringify(state));
-    } catch (e) {
-      console.error("No se pudo guardar:", e);
-    }
+  async function insertMovement(m) {
+    const { error } = await sb.from("movements").insert({
+      id: m.id, category: m.category, amount: m.amount, type: m.type, date: m.date, created_at: m.createdAt
+    });
+    return error;
+  }
+  async function updateMovement(m) {
+    const { error } = await sb.from("movements")
+      .update({ category: m.category, amount: m.amount, type: m.type, date: m.date })
+      .eq("id", m.id);
+    return error;
+  }
+  async function deleteMovementRow(id) {
+    const { error } = await sb.from("movements").delete().eq("id", id);
+    return error;
+  }
+  async function insertCategory(name) {
+    const { error } = await sb.from("categories").insert({ name });
+    return error;
+  }
+  async function insertCard(c) {
+    const { error } = await sb.from("credit_cards").insert(cardToRow(c));
+    return error;
+  }
+  async function updateCard(c) {
+    const row = cardToRow(c);
+    delete row.id;
+    const { error } = await sb.from("credit_cards").update(row).eq("id", c.id);
+    return error;
+  }
+  async function deleteCardRow(id) {
+    const { error } = await sb.from("credit_cards").delete().eq("id", id);
+    return error;
   }
 
   // ---------- Utils ----------
@@ -1241,11 +1297,15 @@
     return `<div class="chip ${sel}" data-cat="${escapeHtml(cat)}">${escapeHtml(cat)}</div>`;
   }
 
-  document.getElementById("newCatSave").addEventListener("click", () => {
+  document.getElementById("newCatSave").addEventListener("click", async () => {
     const input = document.getElementById("newCatInput");
     const name = input.value.trim();
     if (!name) return;
-    if (!state.categories.includes(name)) state.categories.push(name);
+    if (!state.categories.includes(name)) {
+      const error = await insertCategory(name);
+      if (error) { showSaveError(error); return; }
+      state.categories.push(name);
+    }
     selectedCategory = name;
     input.value = "";
     document.getElementById("newCatRow").style.display = "none";
@@ -1341,28 +1401,31 @@
 
     if (editingId) {
       const m = state.movements.find(x => x.id === editingId);
-      m.category = selectedCategory;
-      m.amount = amount;
-      m.type = selectedType;
-      m.date = selectedDate;
+      const updated = { ...m, category: selectedCategory, amount, type: selectedType, date: selectedDate };
+      const error = await updateMovement(updated);
+      if (error) { showSaveError(error); return; }
+      Object.assign(m, updated);
     } else {
-      state.movements.push({
+      const m = {
         id: uid(),
         category: selectedCategory,
         amount: amount,
         type: selectedType,
         date: selectedDate,
         createdAt: Date.now()
-      });
+      };
+      const error = await insertMovement(m);
+      if (error) { showSaveError(error); return; }
+      state.movements.push(m);
     }
-    await saveData();
     render();
     hide(overlay);
   });
 
   deleteBtn.addEventListener("click", async () => {
+    const error = await deleteMovementRow(editingId);
+    if (error) { showSaveError(error); return; }
     state.movements = state.movements.filter(m => m.id !== editingId);
-    await saveData();
     render();
     hide(overlay);
   });
@@ -1461,13 +1524,17 @@
     }).join("");
 
     wrap.querySelectorAll(".knob-slider").forEach(sl => {
-      sl.addEventListener("input", async () => {
+      sl.addEventListener("input", () => {
         const c = state.creditCards.find(x => x.id === sl.dataset.id);
         c.paymentAmount = parseFloat(sl.value);
         renderCardsList();
         renderRelativeTile();
         renderPinnedCards();
-        await saveData();
+      });
+      sl.addEventListener("change", async () => {
+        const c = state.creditCards.find(x => x.id === sl.dataset.id);
+        const error = await updateCard(c);
+        if (error) showSaveError(error);
       });
     });
     updateCardsTotal();
@@ -1544,19 +1611,24 @@
 
     if (editingCardId) {
       const c = state.creditCards.find(x => x.id === editingCardId);
-      c.name = name; c.totalDebt = debt; c.cutDay = cutDay; c.dueDay = dueDay; c.minPercent = minPercent;
-      c.minPayment = isNaN(minPaymentRaw) ? null : minPaymentRaw;
-      const min = getMinPayment(c);
-      if (c.paymentAmount != null) c.paymentAmount = Math.min(Math.max(c.paymentAmount, min), Math.max(debt, min));
+      const updated = { ...c, name, totalDebt: debt, cutDay, dueDay, minPercent,
+        minPayment: isNaN(minPaymentRaw) ? null : minPaymentRaw };
+      const min = getMinPayment(updated);
+      if (updated.paymentAmount != null) updated.paymentAmount = Math.min(Math.max(updated.paymentAmount, min), Math.max(debt, min));
+      const error = await updateCard(updated);
+      if (error) { showSaveError(error); return; }
+      Object.assign(c, updated);
     } else {
-      state.creditCards.push({
+      const c = {
         id: uid(), name, totalDebt: debt, cutDay, dueDay, minPercent,
         minPayment: isNaN(minPaymentRaw) ? null : minPaymentRaw,
         paymentAmount: null
-      });
+      };
+      const error = await insertCard(c);
+      if (error) { showSaveError(error); return; }
+      state.creditCards.push(c);
     }
 
-    await saveData();
     render();
     renderCardsList();
     renderCardsCalendar();
@@ -1564,8 +1636,9 @@
   });
 
   document.getElementById("cfDeleteBtn").addEventListener("click", async () => {
+    const error = await deleteCardRow(editingCardId);
+    if (error) { showSaveError(error); return; }
     state.creditCards = state.creditCards.filter(c => c.id !== editingCardId);
-    await saveData();
     render();
     renderCardsList();
     hide(cardFormOverlay);
